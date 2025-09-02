@@ -1,0 +1,26 @@
+name: Premarket-5 Pro (DDM)
+on:
+  schedule:
+    # 03:40 ET (EDT/EST 보정)
+    - cron: '40 7 * * 1-5'
+    - cron: '40 8 * * 1-5'
+    # 04:10 ET 2차 스캔(DDM 지표 반영)
+    - cron: '10 8 * * 1-5'
+    - cron: '10 9 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install -r requirements.txt
+      - env:
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+          BENZINGA_API_KEY: ${{ secrets.BENZINGA_API_KEY }}
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main_pro.py
