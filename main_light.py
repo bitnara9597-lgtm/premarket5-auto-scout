@@ -1,8 +1,10 @@
-# main_pro.py — DDM 모드(Polygon 분봉 기반 PHL/VWAP/RVOL 계산)
-import os, re, json
+# main_pro.py — DDM 모드(Polygon 분봉 기반 PHL/VWAP/RVOL 계산, DST 자동, 폴백 포함)
+import os, re
 import datetime as dt
 from typing import List, Dict, Any
+from zoneinfo import ZoneInfo
 import requests
+import xml.etree.ElementTree as ET
 
 # --- 환경변수 ---
 POLY = os.getenv('POLYGON_API_KEY')
@@ -11,18 +13,21 @@ FINN = os.getenv('FINNHUB_API_KEY')
 TG_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TG_CHAT  = os.getenv('TELEGRAM_CHAT_ID')
 
+# --- 타임존 (DST 자동) ---
+TZ_UTC = dt.timezone.utc
+TZ_NY  = ZoneInfo("America/New_York")
+TZ_KST = dt.timezone(dt.timedelta(hours=9))
+
 # --- 상수/규칙 ---
 PRICE_MIN, PRICE_MAX = 0.10, 3.00
 EXCH_ALLOW = {"NASDAQ", "NYSE", "NYSE American", "AMEX"}
+EXCH_ALLOW_CODES = {"XNAS", "XNYS", "XASE", "ARCX"}  # Polygon 코드형 허용
 BL = re.compile(r"(-W|W$|WS$|WT$|\.W|U$|\.U|/WS|/W|/U|PR$|P$)")
 TICKER_RGX = [
     re.compile(r"(NASDAQ|Nasdaq|NYSE(?:\s+American)?|AMEX)[:\s-]*([A-Z]{1,5})"),  # 괄호 없음
     re.compile(r"\((NASDAQ|NYSE|NYSE\s+American|AMEX):\s*([A-Z]{1,5})\)"),         # (NASDAQ: ABCD)
     re.compile(r"\b([A-Z]{1,5})\b")                                                # 최후 보조
 ]
-TZ_UTC = dt.timezone.utc
-TZ_ET4 = dt.timezone(dt.timedelta(hours=-4))  # 표시용(스케줄은 YAML로 보정)
-TZ_KST = dt.timezone(dt.timedelta(hours=9))
 
 POS_KEYS = {
     "buyback": 35, "repurchase": 35, "stock repurchase": 35, "10b5-1": 12,
@@ -44,11 +49,10 @@ PR_RSS = [
 now_utc = lambda: dt.datetime.now(TZ_UTC)
 
 def fmt_dual(ts: dt.datetime)->str:
-    et=ts.astimezone(TZ_ET4); kst=ts.astimezone(TZ_KST)
+    et=ts.astimezone(TZ_NY); kst=ts.astimezone(TZ_KST)
     return f"{et:%Y-%m-%d %H:%M} ET / {kst:%Y-%m-%d %H:%M} KST"
 
 # --- 데이터 취득 ---
-
 def poly_prev_close(sym:str)->float|None:
     if not POLY: return None
     u=f"https://api.polygon.io/v2/aggs/ticker/{sym}/prev?adjusted=true&apiKey={POLY}"
@@ -57,6 +61,15 @@ def poly_prev_close(sym:str)->float|None:
     try: return float(r.json()['results'][0]['c'])
     except Exception: return None
 
+def finnhub_prev_price(sym: str) -> float | None:
+    if not FINN: return None
+    try:
+        r = requests.get(f"https://finnhub.io/api/v1/quote?symbol={sym}&token={FINN}", timeout=8)
+        if r.status_code != 200: return None
+        js = r.json()
+        return float(js.get("pc") or js.get("c") or 0) or None
+    except Exception:
+        return None
 
 def poly_meta(sym:str)->Dict[str,Any]|None:
     if not POLY: return None
@@ -65,16 +78,13 @@ def poly_meta(sym:str)->Dict[str,Any]|None:
     if r.status_code!=200: return None
     return r.json().get('results')
 
-
 def poly_aggs_1min(sym:str, start:dt.datetime, end:dt.datetime)->List[Dict[str,Any]]:
     if not POLY: return []
-    # epoch ms 사용
     s=int(start.timestamp()*1000); e=int(end.timestamp()*1000)
     u=f"https://api.polygon.io/v2/aggs/ticker/{sym}/range/1/minute/{s}/{e}?adjusted=true&sort=asc&limit=50000&apiKey={POLY}"
     r=requests.get(u,timeout=12)
     if r.status_code!=200: return []
     return r.json().get('results',[]) or []
-
 
 def fetch_benzinga(since_iso:str)->List[Dict[str,Any]]:
     if not BENZ: return []
@@ -83,8 +93,6 @@ def fetch_benzinga(since_iso:str)->List[Dict[str,Any]]:
     r=requests.get(u,timeout=15)
     if r.status_code!=200: return []
     js=r.json(); return js if isinstance(js,list) else []
-
-import xml.etree.ElementTree as ET
 
 def fetch_rss()->List[Dict[str,Any]]:
     rows=[]
@@ -98,7 +106,6 @@ def fetch_rss()->List[Dict[str,Any]]:
     return rows
 
 # --- 파싱/스코어 ---
-
 def extract_tickers(title:str)->List[str]:
     title=title.replace('–','-'); hits=set()
     for rgx in TICKER_RGX:
@@ -108,7 +115,6 @@ def extract_tickers(title:str)->List[str]:
             if 1<=len(s)<=5 and not BL.search(s): hits.add(s)
     return list(hits)
 
-
 def classify_event(text:str)->int:
     t=text.lower(); score=0
     for k,v in POS_KEYS.items():
@@ -116,7 +122,6 @@ def classify_event(text:str)->int:
     for k,v in NEG_KEYS.items():
         if k in t: score+=v
     return score
-
 
 def build_news_rows(hours:int=12)->List[Dict[str,Any]]:
     since=now_utc()-dt.timedelta(hours=hours)
@@ -143,13 +148,12 @@ def build_news_rows(hours:int=12)->List[Dict[str,Any]]:
     return uniq
 
 # --- 프리장 메트릭 계산 ---
-
 def premkt_metrics(sym:str, prev_close:float)->Dict[str,Any]:
-    # 04:00 ET ~ 지금까지 분봉
-    et=now_utc().astimezone(TZ_ET4)
-    start=et.replace(hour=4,minute=0,second=0,microsecond=0).astimezone(TZ_UTC)
-    end  =now_utc()
-    bars=poly_aggs_1min(sym,start,end)
+    # 04:00 America/New_York부터 현재까지
+    et_now = now_utc().astimezone(TZ_NY)
+    start  = et_now.replace(hour=4,minute=0,second=0,microsecond=0).astimezone(TZ_UTC)
+    end    = now_utc()
+    bars   = poly_aggs_1min(sym,start,end)
     if not bars:
         return {"phl":None,"vwap":None,"rvol1":None,"rvol3":None,"rvol5":None,"dv5k":None,"last":prev_close}
     highs=[b.get('h',0) for b in bars]; vols=[b.get('v',0) for b in bars]; closes=[b.get('c',0) for b in bars]
@@ -159,15 +163,12 @@ def premkt_metrics(sym:str, prev_close:float)->Dict[str,Any]:
     last=closes[-1] if closes else prev_close
     # RVOL: 최근 1/3/5분 vs 직전 20분 평균
     def rvol(n:int)->float|None:
-        if len(vols)<(n+20):
-            return None
-        recent=sum(vols[-n:])
-        base =sum(vols[-(n+20):-n])/20
+        if len(vols)<(n+20): return None
+        recent=sum(vols[-n:]); base=sum(vols[-(n+20):-n])/20
         if base<=0: return None
         return round(recent/base,2)
     r1,r3,r5 = rvol(1), rvol(3), rvol(5)
     # 5분 누적 대금($)
-    import math
     dv5 = sum([(bars[-i]['v']*bars[-i]['c']) for i in range(1, min(5,len(bars))+1)]) if bars else 0
     dv5k = int(dv5/1000)
     return {"phl":round(phl,4) if phl else None,
@@ -176,44 +177,45 @@ def premkt_metrics(sym:str, prev_close:float)->Dict[str,Any]:
             "dv5k":dv5k, "last":last}
 
 # --- 후보 생성 ---
-
 def build_candidates()->List[Dict[str,Any]]:
     out=[]
     for r in build_news_rows(12):
         sym=r['symbol'].upper()
-        if BL.search(sym):
-            continue
-        price=poly_prev_close(sym)
-        if price is None or not (PRICE_MIN<=price<=PRICE_MAX):
-            continue
+        if BL.search(sym): continue
+        # 가격 폴백(Polygon → Finnhub)
+        price = poly_prev_close(sym) or finnhub_prev_price(sym)
+        if price is None or not (PRICE_MIN<=price<=PRICE_MAX): continue
+        # 거래소 필터(이름/코드 모두 수용)
         meta=poly_meta(sym) or {}
-        exch=meta.get('primary_exchange') or meta.get('primary_exchange_name') or meta.get('listing_exchange') or ''
-        if exch and not any(e in str(exch) for e in EXCH_ALLOW):
-            continue
+        exch_name = meta.get('primary_exchange_name') or meta.get('listing_exchange') or meta.get('primary_exchange') or ''
+        exch_code = meta.get('primary_exchange') or ''
+        allowed = any(e in str(exch_name) for e in EXCH_ALLOW) or str(exch_code) in EXCH_ALLOW_CODES
+        if (exch_name or exch_code) and not allowed: continue
+        # 이벤트 점수 → 기본 확률
         es=classify_event(r['title'])
-        # 기본 확률(이벤트 기반)
         prob_base=max(0, min(90, 30+int(es*0.8)))
-        out.append({**r, 'symbol':sym, 'price':price, 'exchange':str(exch), 'escore':es, 'prob_base':prob_base})
-    # 정렬
+        out.append({**r, 'symbol':sym, 'price':price, 'exchange':str(exch_name or exch_code) or 'N/A',
+                    'escore':es, 'prob_base':prob_base})
     out.sort(key=lambda x:x['prob_base'], reverse=True)
     return out
 
 # --- 포맷 & 발송 ---
-
 def send_tg(text:str)->bool:
     if not (TG_TOKEN and TG_CHAT): return False
     url=f'https://api.telegram.org/bot{TG_TOKEN}/sendMessage'
-    return requests.post(url,json={'chat_id':TG_CHAT,'text':text,'parse_mode':'Markdown'},timeout=10).status_code==200
-
+    payload={'chat_id':TG_CHAT,'text':text,'parse_mode':'Markdown','disable_web_page_preview':True}
+    try:
+        return requests.post(url,json=payload,timeout=10).status_code==200
+    except Exception:
+        return False
 
 def to_rows(cands:List[Dict[str,Any]])->str:
     nowline=fmt_dual(now_utc()); lines=[f"🔔 Premarket-5 Auto-Scout(DDM) @ {nowline}\n"]
-    et=now_utc().astimezone(TZ_ET4)
+    et=now_utc().astimezone(TZ_NY)
     is_0410 = (et.hour>4 or (et.hour==4 and et.minute>=10))
     picks=[]
     for c in cands:
         m = premkt_metrics(c['symbol'], c['price']) if is_0410 else {"phl":None,"vwap":None,"rvol1":None,"rvol3":None,"rvol5":None,"dv5k":None,"last":c['price']}
-        # 미반영/체결 강도 가점
         bonus=0
         gap = (m['last']-c['price'])/c['price']*100 if c['price'] else 0
         if is_0410:
@@ -221,9 +223,7 @@ def to_rows(cands:List[Dict[str,Any]])->str:
             if m['dv5k'] and 50<=m['dv5k']<=250: bonus+=8
             if 0<=gap<=12: bonus+=4
         prob = max(0, min(95, c['prob_base'] + bonus))
-        c2={**c, 'metrics':m, 'prob':prob}
-        picks.append(c2)
-    # 확률 65% 이상만
+        picks.append({**c,'metrics':m,'prob':prob})
     picks=[p for p in picks if p['prob']>=65][:5]
     for i,p in enumerate(picks,1):
         m=p['metrics']
@@ -242,7 +242,6 @@ def to_rows(cands:List[Dict[str,Any]])->str:
     if not picks:
         lines.append('현재 기준 ≥65% 후보가 없습니다. (조건 미충족 또는 데이터 부족)')
     return "\n".join(lines)
-
 
 def main():
     cands=build_candidates()
