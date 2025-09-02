@@ -1,6 +1,3 @@
-아래 전체를 그대로 붙여넣어 \*\*`main_light.py`\*\*로 저장하면 됩니다.
-
-```python
 # main_light.py — Premarket-5 Auto-Scout (DDM)
 # - Polygon 분봉 기반 PHL/VWAP/RVOL 계산
 # - DST 자동 변환
