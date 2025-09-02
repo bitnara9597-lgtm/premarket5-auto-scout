@@ -244,9 +244,12 @@ def to_rows(cands:List[Dict[str,Any]])->str:
     return "\n".join(lines)
 
 def main():
-    cands=build_candidates()
-    msg=to_rows(cands)
-    send_tg(msg)
+    cands = build_candidates()
+    msg = to_rows(cands)
+    ok = send_tg(msg)
+    print(msg)  # 로그로도 남김
+    if not ok:
+        raise SystemExit("❌ Telegram send failed. Check secrets/chat id/bot membership.")
 
-if __name__=='__main__':
+if __name__ == '__main__':
     main()
