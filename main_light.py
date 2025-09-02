@@ -15,19 +15,29 @@ TG_CHAT  = os.getenv('TELEGRAM_CHAT_ID')
 PRICE_MIN, PRICE_MAX = 0.10, 3.00
 EXCH_ALLOW = {"NASDAQ", "NYSE", "NYSE American", "AMEX"}
 BL = re.compile(r"(-W|W$|WS$|WT$|\.W|U$|\.U|/WS|/W|/U|PR$|P$)")
-TICKER_RGX=[re.compile(r"\((NASDAQ|NYSE|NYSE\s+American|AMEX):\s*([A-Z]{1,5})\)"), re.compile(r"\b([A-Z]{1,5})\b")]
+TICKER_RGX = [
+    re.compile(r"(NASDAQ|Nasdaq|NYSE(?:\s+American)?|AMEX)[:\s-]*([A-Z]{1,5})"),  # 괄호 없음
+    re.compile(r"\((NASDAQ|NYSE|NYSE\s+American|AMEX):\s*([A-Z]{1,5})\)"),         # (NASDAQ: ABCD)
+    re.compile(r"\b([A-Z]{1,5})\b")                                                # 최후 보조
+]
 TZ_UTC = dt.timezone.utc
 TZ_ET4 = dt.timezone(dt.timedelta(hours=-4))  # 표시용(스케줄은 YAML로 보정)
 TZ_KST = dt.timezone(dt.timedelta(hours=9))
 
-POS_KEYS = {"buyback":30,"repurchase":30,"10b5-1":10, "fda approval":35,"clearance":24,"de novo":28,"510(k)":24,
-            "contract":25,"award":20,"partnership":18,"distribution":16, "merger":28,"definitive":8,"acquisition":22,
-            "earnings":18,"guidance raise":22,"beats":16}
+POS_KEYS = {
+    "buyback": 35, "repurchase": 35, "stock repurchase": 35, "10b5-1": 12,
+    "fda approval": 40, "clearance": 28, "de novo": 30, "510(k)": 26, "ce mark": 20,
+    "contract": 26, "award": 22, "partnership": 20, "distribution": 18,
+    "merger": 32, "definitive": 10, "acquisition": 26,
+    "earnings": 18, "guidance raise": 24, "beats": 18, "record revenue": 16
+}
 NEG_KEYS = {"s-3":-25,"s-1":-18,"424b5":-25,"atm":-20, "registered direct":-22,"warrant":-12,"reverse split":-30}
 
-PR_RSS=[
-  'https://www.prnewswire.com/rss/industry/business-technology-latest-news.rss',
-  'https://www.businesswire.com/portal/site/home/news/rh/us/rss/industry/?vnsId=31326&newsLang=EN'
+PR_RSS = [
+    "https://www.prnewswire.com/rss/industry/business-technology-latest-news.rss",
+    "https://www.businesswire.com/portal/site/home/news/rh/us/rss/industry/?vnsId=31326&newsLang=EN",
+    "https://www.globenewswire.com/RssFeed/industry/All-Press-Releases.xml",
+    "https://www.accesswire.com/rss/latest.xml"
 ]
 
 # --- 유틸 ---
